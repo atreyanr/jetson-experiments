@@ -1,0 +1,9 @@
+numpy
+matplotlib
+jupyter
+
+# PyTorch: platform-dependent, not installable via pip on Jetson.
+# - Jetson (JetPack 7.x / CUDA 13.x): use upstream SBSA wheels from https://download.pytorch.org/whl/cu132
+#   pip install torch --index-url https://download.pytorch.org/whl/cu132
+# - x86 with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu124
+# - CPU only: pip install torch --index-url https://download.pytorch.org/whl/cpu

@@ -14,4 +14,13 @@ runs/
 *.onnx
 *.trt
 *.engine
-.claude/
+.claude/*
+!.claude/commands/
+!.claude/settings.json
+
+# CUDA build artifacts
+cuda-matmul/matmul
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+*.qdstrm
