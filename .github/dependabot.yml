@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+    reviewers:
+      - "atreyanr"
+    open-pull-requests-limit: 5
+    target-branch: "dev"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "ci(deps)"
+    reviewers:
+      - "atreyanr"
+    open-pull-requests-limit: 5
+    target-branch: "dev"
