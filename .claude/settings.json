@@ -1,0 +1,8 @@
+{
+  "enabledPlugins": {
+    "github@claude-plugins-official": true,
+    "ecc@ecc": true,
+    "andrej-karpathy-skills@karpathy-skills": true,
+    "mattpocock-skills@mattpocock": true
+  }
+}
