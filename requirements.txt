@@ -1,6 +1,9 @@
 numpy
 matplotlib
 jupyter
+tiktoken
+datasets
+tqdm
 
 # PyTorch: platform-dependent, not installable via pip on Jetson.
 # - Jetson (JetPack 7.x / CUDA 13.x): use upstream SBSA wheels from https://download.pytorch.org/whl/cu132
