@@ -33,7 +33,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu132
 ### CUDA C++ (per-experiment directory)
 
 ```bash
-cd cuda-matmul
+cd experiments/cuda-matmul
 make              # builds with nvcc -O2 -arch=sm_87, links -lcublas
 ./matmul          # default 1024x1024; pass N as arg: ./matmul 2048
 make clean        # removes binary + profiler artifacts
