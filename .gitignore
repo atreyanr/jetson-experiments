@@ -19,7 +19,8 @@ runs/
 !.claude/settings.json
 
 # CUDA build artifacts
-cuda-matmul/matmul
+experiments/cuda-matmul/matmul
+experiments/cuda-fft/fft_bench
 *.nsys-rep
 *.ncu-rep
 *.sqlite

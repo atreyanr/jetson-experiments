@@ -7,7 +7,36 @@ on:
     branches: [dev]
 
 jobs:
+  detect-changes:
+    runs-on: self-hosted
+    outputs:
+      cuda: ${{ steps.filter.outputs.cuda }}
+      python: ${{ steps.filter.outputs.python }}
+      docs: ${{ steps.filter.outputs.docs }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            cuda:
+              - 'experiments/cuda-*/**/*.cu'
+              - 'experiments/cuda-*/**/Makefile'
+            python:
+              - '**/*.py'
+              - '**/*.ipynb'
+              - 'requirements.txt'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
+            ci:
+              - '.github/workflows/**'
+              - '.github/dependabot.yml'
+
   cuda-build:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cuda == 'true'
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v7
@@ -15,8 +44,34 @@ jobs:
       - name: Verify CUDA toolchain
         run: nvcc --version
 
-      - name: Build cuda-matmul
-        run: make -C cuda-matmul clean all
+      - name: Find and build all CUDA experiments
+        run: |
+          for makefile in $(find . -name Makefile -path '*/cuda-*/*'); do
+            dir=$(dirname "$makefile")
+            echo "::group::Building $dir"
+            make -C "$dir" clean all
+            echo "::endgroup::"
+          done
 
-      - name: Smoke test
-        run: ./cuda-matmul/matmul 256
+      - name: Smoke test cuda-matmul
+        run: ./experiments/cuda-matmul/matmul 256
+
+  python-lint:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python == 'true'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ruff
+        run: pip install --quiet ruff
+
+      - name: Lint Python files
+        run: ruff check --select E,F,W --ignore E501 .
+
+      - name: Check notebook syntax
+        run: |
+          for nb in $(find . -name '*.ipynb' -not -path './.ipynb_checkpoints/*'); do
+            echo "Checking $nb"
+            python3 -c "import json; json.load(open('$nb'))" || exit 1
+          done
