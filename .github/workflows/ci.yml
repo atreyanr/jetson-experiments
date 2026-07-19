@@ -10,7 +10,7 @@ jobs:
   cuda-build:
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify CUDA toolchain
         run: nvcc --version
