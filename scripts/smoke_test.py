@@ -2,9 +2,9 @@
 """Smoke test: verify CUDA, PyTorch, and Triton work on this Jetson."""
 
 import sys
-sys.path = [p for p in sys.path if "dist-packages" not in p or ".venv" in p]
+import warnings  # noqa: E402
 
-import warnings
+sys.path = [p for p in sys.path if "dist-packages" not in p or ".venv" in p]
 warnings.filterwarnings("ignore")
 
 
@@ -58,7 +58,9 @@ def check_triton():
     y = torch.randn(n, device="cuda")
     out = torch.empty(n, device="cuda")
 
-    grid = lambda meta: (triton.cdiv(n, meta["BLOCK"]),)
+    def grid(meta):
+        return (triton.cdiv(n, meta["BLOCK"]),)
+
     add_kernel[grid](x, y, out, n, BLOCK=256)
 
     assert torch.allclose(out, x + y, atol=1e-5), "Triton kernel produced wrong results"
