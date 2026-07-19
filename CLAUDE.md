@@ -50,7 +50,7 @@ make profile-kernel   # ncu per-kernel analysis → matmul_kernels.ncu-rep
 
 See `docs/jetson-learnings.md` for the full list. The critical ones:
 
-- **sys.path stripping**: system packages leak into venvs. Every notebook must start with `sys.path = [p for p in sys.path if "/usr/lib/python3" not in p]` before other imports.
+- **sys.path stripping**: system `dist-packages` leak into venvs. Every script/notebook must start with `sys.path = [p for p in sys.path if "dist-packages" not in p or ".venv" in p]` before other imports. Do NOT filter `/usr/lib/python3` broadly — that removes stdlib modules like `ctypes`.
 - **cuBLAS first-call overhead**: `cudaMalloc` and library init dominate wall-clock timing. Use nsys `cuda_gpu_kern_sum` for real kernel times, not `cudaEventElapsedTime` on cold runs.
 - **Unified memory**: prefer `cudaMallocManaged` over `cudaMalloc` + `cudaMemcpy` on this device — same physical memory, no transfer.
 

@@ -56,6 +56,16 @@ jobs:
       - name: Smoke test cuda-matmul
         run: ./experiments/cuda-matmul/matmul 256
 
+  smoke-test:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python == 'true' || needs.detect-changes.outputs.ci == 'true'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run environment smoke test
+        run: python3 scripts/smoke_test.py
+
   python-lint:
     needs: detect-changes
     if: needs.detect-changes.outputs.python == 'true'
