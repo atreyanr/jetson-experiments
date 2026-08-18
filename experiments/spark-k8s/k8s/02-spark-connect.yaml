@@ -1,0 +1,121 @@
+## ---- Spark configuration (edit memory/cores here) ----
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-defaults
+  namespace: spark
+data:
+  spark-defaults.conf: |
+    # ---------- cluster manager ----------
+    # local[*] = all compute in-process (right for single-node Jetson)
+    # Switch to k8s://https://kubernetes.default.svc:443 when adding nodes
+    spark.master                                            local[*]
+
+    # ---------- K8s settings (used only when spark.master = k8s://…) ----------
+    spark.kubernetes.namespace                              spark
+    spark.kubernetes.authenticate.driver.serviceAccountName spark
+    spark.kubernetes.container.image                        apache/spark:4.1.2
+    spark.kubernetes.driver.label.app                       spark-connect
+    spark.kubernetes.executor.label.app                     spark-executor
+    spark.kubernetes.executor.request.cores                 2
+
+    # ---------- driver (Connect server) ----------
+    spark.driver.memory                                     2g
+
+    # ---------- Spark Connect ----------
+    spark.connect.grpc.binding.port                         15002
+
+    # ---------- UI ----------
+    spark.ui.port                                           4040
+
+    # ---------- pod labels ----------
+    spark.kubernetes.driver.label.app                       spark-connect
+    spark.kubernetes.executor.label.app                     spark-executor
+---
+## ---- Spark Connect server ----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-connect
+  namespace: spark
+  labels:
+    app: spark-connect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-connect
+  template:
+    metadata:
+      labels:
+        app: spark-connect
+    spec:
+      serviceAccountName: spark
+      containers:
+        - name: spark-connect
+          image: apache/spark:4.1.2          # ← match ConfigMap image
+          command: ["/bin/bash", "-c"]
+          args:
+            - >-
+              export SPARK_NO_DAEMONIZE=true &&
+              /opt/spark/sbin/start-connect-server.sh
+              --properties-file /opt/spark/conf/spark-defaults.conf
+          ports:
+            - name: grpc
+              containerPort: 15002
+            - name: ui
+              containerPort: 4040
+            - name: driver-rpc
+              containerPort: 7078
+            - name: block-mgr
+              containerPort: 7079
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "3Gi"
+              cpu: "4000m"
+          volumeMounts:
+            - name: spark-conf
+              mountPath: /opt/spark/conf/spark-defaults.conf
+              subPath: spark-defaults.conf
+          readinessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 60
+            periodSeconds: 20
+      volumes:
+        - name: spark-conf
+          configMap:
+            name: spark-defaults
+---
+## ---- Expose Connect + UI to the host ----
+## k3s ships ServiceLB (Klipper) — LoadBalancer binds directly on the host
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-connect
+  namespace: spark
+spec:
+  type: LoadBalancer
+  selector:
+    app: spark-connect
+  ports:
+    - name: grpc
+      port: 15002
+      targetPort: 15002
+    - name: ui
+      port: 4040
+      targetPort: 4040
+    - name: driver-rpc
+      port: 7078
+      targetPort: 7078
+    - name: block-mgr
+      port: 7079
+      targetPort: 7079
