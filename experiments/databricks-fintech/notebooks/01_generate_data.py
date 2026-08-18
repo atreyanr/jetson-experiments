@@ -1,4 +1,5 @@
 # Databricks notebook source
+# ruff: noqa: E402, F821
 
 # MAGIC %md
 # MAGIC # 🎲 Notebook 01 — Synthetic Data Generation
@@ -40,12 +41,9 @@
 # COMMAND ----------
 
 import random
-import uuid
 import json
-import math
 from datetime import datetime, timedelta
-from pyspark.sql import Row
-from pyspark.sql.types import *
+from pyspark.sql.types import StructType  # noqa: F401 — available for schema definition
 
 SEED = 42
 random.seed(SEED)
@@ -244,7 +242,7 @@ def _random_email(first, last, invalid=False):
         bad = random.choice([
             f"{first}{last}",                     # missing @
             f"{first}@@example.com",              # double @
-            f"@example.com",                      # missing local part
+            "@example.com",                      # missing local part
             f"{first}.{last}@",                   # missing domain
             f"{first} {last}@example.com",        # space in address
         ])
@@ -425,7 +423,6 @@ def _random_ip():
 
 def generate_transactions(accounts, merchants, n=250000):
     txns = []
-    merchant_ids = [m["merchant_id"] for m in merchants]
 
     for i in range(n):
         txn_type = random.choices(
@@ -600,7 +597,7 @@ print(f"Generated {len(EXCHANGE_RATES)} exchange rate records ({len(EXCHANGE_RAT
 def write_jsonl(records, path):
     """Write a list of dicts as JSON Lines to the volume."""
     lines = [json.dumps(r) for r in records]
-    dbutils.fs.put(path.replace("/Volumes/", "dbfs:/Volumes/"), "\n".join(lines), overwrite=True)
+    dbutils.fs.put(path.replace("/Volumes/", "dbfs:/Volumes/"), "\n".join(lines), overwrite=True)  # noqa: F405
     return len(lines)
 
 # COMMAND ----------
@@ -694,9 +691,9 @@ print(f"    Negative amounts:       ~{n_neg:,}")
 print(f"    Future-dated:           ~{n_future:,}")
 print(f"    Invalid emails:         ~{invalid_emails:,}")
 print(f"    Orphan accounts:        ~{orphan_count:,}")
-print(f"    Mixed date formats:     ✔ (3 formats)")
-print(f"    Mixed city casing:      ✔ (title/lower/UPPER)")
-print(f"    Phone format variants:  ✔ (6 formats)")
+print("    Mixed date formats:     ✔ (3 formats)")
+print("    Mixed city casing:      ✔ (title/lower/UPPER)")
+print("    Phone format variants:  ✔ (6 formats)")
 print(f"    Float-point artifacts:  ~{int(len(TRANSACTIONS)*0.05):,}")
 print()
 print(f"  Volume: {VOLUME}")

@@ -1,4 +1,5 @@
 # Databricks notebook source
+# ruff: noqa: E402, F821
 
 # MAGIC %md
 # MAGIC # 🏗️ Notebook 00 — Unity Catalog Setup
@@ -110,7 +111,7 @@ print()
 print("Catalog:  fintech_lab")
 print("Schemas:  bronze · silver · gold")
 print("Volume:   fintech_lab.bronze.landing_zone")
-print(f"Path:     /Volumes/fintech_lab/bronze/landing_zone/")
+print("Path:     /Volumes/fintech_lab/bronze/landing_zone/")
 
 # COMMAND ----------
 

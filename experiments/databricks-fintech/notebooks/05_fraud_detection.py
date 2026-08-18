@@ -1,4 +1,5 @@
 # Databricks notebook source
+# ruff: noqa: E402, F821
 
 # MAGIC %md
 # MAGIC # 🔍 Advanced Fraud Detection Engine
@@ -28,10 +29,6 @@
 
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
-from pyspark.sql.types import (
-    StructType, StructField, StringType, DoubleType,
-    TimestampType, IntegerType, ArrayType
-)
 from functools import reduce
 
 # -- Configuration ----------------------------------------------------------
@@ -571,7 +568,7 @@ alerts_deduped.groupBy("account_id", "customer_id").agg(
 
 # Overall fraud rate
 fraud_rate = (final_count / total_txn_count * 100) if total_txn_count > 0 else 0
-print(f"\n📊 FRAUD DETECTION SUMMARY")
+print("\n📊 FRAUD DETECTION SUMMARY")
 print(f"   Total transactions analyzed: {total_txn_count:,}")
 print(f"   Total alerts generated:      {final_count:,}")
 print(f"   Alert rate:                  {fraud_rate:.2f}%")

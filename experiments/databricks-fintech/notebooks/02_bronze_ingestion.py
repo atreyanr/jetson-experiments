@@ -1,4 +1,5 @@
 # Databricks notebook source
+# ruff: noqa: E402, F821
 
 # MAGIC %md
 # MAGIC # 🥉 Notebook 02 — Bronze Layer Ingestion
@@ -49,7 +50,7 @@ print(f"Source:  {VOLUME}")
 
 # COMMAND ----------
 
-from pyspark.sql.functions import current_timestamp, input_file_name, lit
+from pyspark.sql.functions import current_timestamp, input_file_name
 
 def ingest_to_bronze(source_path, table_name, file_format="json"):
     """

@@ -1,4 +1,5 @@
 # Databricks notebook source
+# ruff: noqa: E402, F821
 
 # MAGIC %md
 # MAGIC # 03 — Delta Live Tables: Bronze → Silver
@@ -43,10 +44,10 @@ from pyspark.sql.functions import (
     col, when, lit, coalesce, to_date, to_timestamp,
     initcap, lower, upper, trim, round as spark_round,
     regexp_replace, current_timestamp, row_number, abs as spark_abs,
-    concat, date_format
+    date_format
 )
 from pyspark.sql.window import Window
-from pyspark.sql.types import DecimalType, DateType, TimestampType, BooleanType
+from pyspark.sql.types import DecimalType, DateType, BooleanType
 
 # COMMAND ----------
 

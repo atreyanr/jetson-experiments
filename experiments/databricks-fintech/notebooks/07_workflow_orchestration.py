@@ -1,4 +1,5 @@
 # Databricks notebook source
+# ruff: noqa: E402, F821
 
 # MAGIC %md
 # MAGIC # 🔧 Workflow Orchestration — Fintech Pipeline
@@ -168,8 +169,6 @@ from databricks.sdk.service.jobs import (
     CronSchedule,
     JobEmailNotifications,
     PauseStatus,
-    RunIf,
-    JobParameter,
 )
 
 w = WorkspaceClient()

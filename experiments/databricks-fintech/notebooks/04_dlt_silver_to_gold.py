@@ -1,4 +1,5 @@
 # Databricks notebook source
+# ruff: noqa: E402, F821
 
 # MAGIC %md
 # MAGIC # 04 — Delta Live Tables: Silver → Gold
@@ -34,8 +35,7 @@
 import dlt
 from pyspark.sql.functions import (
     col, lit, when, count, sum as spark_sum, avg, min as spark_min, max as spark_max,
-    countDistinct, round as spark_round, datediff, current_date, current_timestamp,
-    first, concat_ws, collect_set, date_format, dense_rank, ntile,
+    countDistinct, round as spark_round, datediff, current_date, first, concat_ws, collect_set, date_format, dense_rank, ntile,
     coalesce, expr,
 )
 from pyspark.sql.window import Window
