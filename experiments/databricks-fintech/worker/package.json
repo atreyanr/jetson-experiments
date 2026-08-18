@@ -1,0 +1,20 @@
+{
+  "name": "fintech-data-source",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker that generates realistic fintech events via Stripe test mode and writes to R2",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "generate": "curl -s http://localhost:8787/ | jq .",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "stripe": "^17.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241205.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^3.99.0"
+  }
+}

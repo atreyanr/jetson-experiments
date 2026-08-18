@@ -1,0 +1,24 @@
+name = "fintech-data-source"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ── R2 bucket for event landing zone ──────────────────────────
+[[r2_buckets]]
+binding = "EVENTS_BUCKET"
+bucket_name = "fintech-events"
+
+# ── Cron trigger: every 5 minutes ─────────────────────────────
+[triggers]
+crons = ["*/5 * * * *"]
+
+# ── Environment variables ─────────────────────────────────────
+[vars]
+BATCH_SIZE = "25"           # Transactions per run
+CUSTOMER_BATCH = "3"        # New customers per run
+REFUND_BATCH = "2"          # Refunds per run
+ACTIVITY_BATCH = "40"       # Activity events per run
+
+# ── Secrets (set via `wrangler secret put`) ───────────────────
+# STRIPE_SECRET_KEY  — Stripe TEST mode key (sk_test_...)
+#   wrangler secret put STRIPE_SECRET_KEY
