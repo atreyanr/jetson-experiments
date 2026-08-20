@@ -4,23 +4,23 @@
 # MAGIC %md
 # MAGIC # Streaming Bronze Ingestion from Cloudflare R2
 # MAGIC
-# MAGIC This notebook uses **Databricks Auto Loader** (`cloudFiles`) to stream new JSONL files
-# MAGIC from a Cloudflare R2 bucket into bronze Delta tables. It replaces the batch approach
-# MAGIC (notebooks 01 + 02) with an incremental, production-grade ingestion pipeline.
+# MAGIC This notebook syncs JSONL files from a Cloudflare R2 bucket into bronze Delta tables.
+# MAGIC It replaces the batch approach (notebooks 01 + 02) with an incremental pipeline fed
+# MAGIC by the Cloudflare Worker + Stripe test data.
 # MAGIC
-# MAGIC ### Why Auto Loader?
+# MAGIC ### Approach: boto3 → Volume → Spark
 # MAGIC
-# MAGIC | Feature | Batch (`spark.read`) | Auto Loader (`cloudFiles`) |
-# MAGIC |---------|---------------------|---------------------------|
-# MAGIC | File tracking | None — re-reads everything | Checkpoint — processes each file exactly once |
-# MAGIC | New file discovery | Manual re-run | Automatic on each trigger |
-# MAGIC | Schema evolution | Fails on new columns | `addNewColumns` mode handles it |
-# MAGIC | Scalability | Full scan every time | Incremental — only new files |
-# MAGIC | Exactly-once | No guarantee | Yes, via checkpoint |
+# MAGIC Databricks Free Edition uses **serverless compute (Spark Connect)** which blocks
+# MAGIC Hadoop `fs.s3a.*` configs and Auto Loader's `cloudFiles` format for custom S3
+# MAGIC endpoints. Instead, we:
+# MAGIC
+# MAGIC 1. **boto3** downloads new JSONL files from R2 into a Unity Catalog Volume
+# MAGIC 2. **Spark** reads from the Volume and writes to bronze Delta tables
+# MAGIC 3. A **checkpoint file** tracks which R2 objects have been synced (incremental)
 # MAGIC
 # MAGIC ### Prerequisites
 # MAGIC
-# MAGIC Run `01a_configure_r2_connection` first to set up the R2 credentials on this cluster.
+# MAGIC Run `01a_configure_r2_connection` first to set up boto3 credentials and test the connection.
 
 # COMMAND ----------
 
@@ -37,15 +37,17 @@
 # MAGIC ┌────────────────────────────────┐
 # MAGIC │  Cloudflare R2 Bucket          │
 # MAGIC │  fintech-events/               │
-# MAGIC │  ├── customers/year=.../...    │
-# MAGIC │  ├── transactions/year=.../... │
-# MAGIC │  ├── refunds/year=.../...      │
-# MAGIC │  └── activity/year=.../...     │
 # MAGIC └──────────┬─────────────────────┘
-# MAGIC            │ Auto Loader (cloudFiles)
+# MAGIC            │ boto3 sync (incremental)
 # MAGIC            ▼
 # MAGIC ┌────────────────────────────────┐
-# MAGIC │  Databricks Bronze Layer       │
+# MAGIC │  Unity Catalog Volume          │
+# MAGIC │  /Volumes/.../landing_zone/    │
+# MAGIC └──────────┬─────────────────────┘
+# MAGIC            │ spark.read.json()
+# MAGIC            ▼
+# MAGIC ┌────────────────────────────────┐
+# MAGIC │  Bronze Delta Tables           │
 # MAGIC │  fintech_lab.bronze.*_stream   │
 # MAGIC └──────────┬─────────────────────┘
 # MAGIC            │ DLT Pipeline (03+04)
@@ -57,202 +59,196 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install boto3 -q
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Configuration
 
 # COMMAND ----------
 
-# R2 bucket — must match what the Cloudflare Worker writes to
-R2_BUCKET = "fintech-events"
-BASE_PATH = f"s3a://{R2_BUCKET}"
+import boto3
+import os
+import json
 
-# Auto Loader checkpoint location — tracks which files have been processed.
-# Use a DBFS or Volume path so checkpoints survive cluster restarts.
-CHECKPOINT_BASE = "/tmp/fintech_checkpoints"
+# R2 connection — reuse credentials from 01a widgets
+r2_access_key = dbutils.widgets.get("r2_access_key")  # noqa: F405
+r2_secret_key = dbutils.widgets.get("r2_secret_key")  # noqa: F405
+r2_endpoint = dbutils.widgets.get("r2_endpoint")  # noqa: F405
+r2_bucket = dbutils.widgets.get("r2_bucket")  # noqa: F405
 
-# Unity Catalog target
+s3 = boto3.client(
+    "s3",
+    endpoint_url=r2_endpoint,
+    aws_access_key_id=r2_access_key,
+    aws_secret_access_key=r2_secret_key,
+    region_name="auto",
+)
+
+# Paths
+VOLUME_PATH = "/Volumes/fintech_lab/bronze/landing_zone"
+CHECKPOINT_FILE = f"{VOLUME_PATH}/_sync_checkpoint.json"
 CATALOG = "fintech_lab"
 SCHEMA = "bronze"
 
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql(f"USE SCHEMA {SCHEMA}")
 
-print(f"Source:      {BASE_PATH}")
-print(f"Checkpoints: {CHECKPOINT_BASE}")
-print(f"Target:      {CATALOG}.{SCHEMA}.*")
+print(f"R2 bucket:   {r2_bucket}")
+print(f"Volume:      {VOLUME_PATH}")
+print(f"Target:      {CATALOG}.{SCHEMA}.*_stream")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Auto Loader: How It Works
+# MAGIC ## Incremental Sync: R2 → Volume
 # MAGIC
-# MAGIC Auto Loader uses the `cloudFiles` format to read streaming data from cloud storage:
+# MAGIC Downloads only **new** JSONL files from R2. A checkpoint file
+# MAGIC in the Volume tracks which R2 keys have been synced.
+
+# COMMAND ----------
+
+def load_checkpoint():
+    """Load the set of already-synced R2 object keys."""
+    try:
+        with open(CHECKPOINT_FILE) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+
+
+def save_checkpoint(synced_keys):
+    """Persist the set of synced R2 object keys."""
+    os.makedirs(os.path.dirname(CHECKPOINT_FILE), exist_ok=True)
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump(sorted(synced_keys), f)
+
+
+def sync_r2_to_volume(event_type, synced_keys):
+    """
+    Download new JSONL files from R2 into the Volume.
+
+    Args:
+        event_type: R2 prefix (customers, transactions, refunds, activity).
+        synced_keys: Set of already-synced R2 keys (mutated in place).
+
+    Returns:
+        Number of new files downloaded.
+    """
+    prefix = f"{event_type}/"
+    paginator = s3.get_paginator("list_objects_v2")
+    new_count = 0
+
+    for page in paginator.paginate(Bucket=r2_bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+
+            if not key.endswith(".jsonl"):
+                continue
+            if key in synced_keys:
+                continue
+
+            local_path = f"{VOLUME_PATH}/{key}"
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            s3.download_file(r2_bucket, key, local_path)
+
+            synced_keys.add(key)
+            new_count += 1
+
+    return new_count
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Sync All Event Types from R2
+
+# COMMAND ----------
+
+EVENT_TYPES = ["customers", "transactions", "refunds", "activity"]
+
+synced_keys = load_checkpoint()
+print(f"Checkpoint: {len(synced_keys)} files previously synced")
+print()
+
+total_new = 0
+for event_type in EVENT_TYPES:
+    new_count = sync_r2_to_volume(event_type, synced_keys)
+    total_new += new_count
+    status = f"{new_count} new files" if new_count > 0 else "up to date"
+    print(f"  {event_type:15s} → {status}")
+
+save_checkpoint(synced_keys)
+print(f"\n✅ R2 → Volume sync complete ({total_new} new files, {len(synced_keys)} total)")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Load Volume → Bronze Delta Tables
 # MAGIC
-# MAGIC ```python
-# MAGIC spark.readStream.format("cloudFiles")
-# MAGIC     .option("cloudFiles.format", "json")        # File format (json, csv, parquet, etc.)
-# MAGIC     .option("cloudFiles.schemaLocation", "...")  # Where to store inferred schema
-# MAGIC     .option("cloudFiles.inferColumnTypes", True)  # Infer types (not just StringType)
-# MAGIC     .load("s3a://bucket/path")
-# MAGIC ```
-# MAGIC
-# MAGIC Under the hood, Auto Loader:
-# MAGIC 1. Lists the source directory for new files (directory listing mode)
-# MAGIC 2. Reads only files not yet processed (tracked via the checkpoint)
-# MAGIC 3. Infers or evolves the schema as new columns appear
-# MAGIC 4. Writes to the target Delta table with exactly-once semantics
-# MAGIC
-# MAGIC **Two trigger modes:**
-# MAGIC - `trigger(availableNow=True)` — batch: process all pending files, then stop
-# MAGIC - `trigger(processingTime="30 seconds")` — continuous: poll every 30s for new files
+# MAGIC Spark reads JSONL files natively from the Volume and writes to
+# MAGIC bronze Delta tables with ingestion metadata.
 
 # COMMAND ----------
 
 from pyspark.sql.functions import current_timestamp, input_file_name, lit
 
-def stream_from_r2(event_type, target_table, schema_hints=None):
+def ingest_to_bronze(event_type, target_table):
     """
-    Start an Auto Loader stream from R2 for a specific event type.
-
-    Args:
-        event_type: Subfolder in R2 (customers, transactions, refunds, activity).
-        target_table: Bronze Delta table name (e.g. "raw_customers_stream").
-        schema_hints: Optional schema hints string, e.g. "amount DOUBLE, id STRING".
-
-    Returns:
-        The streaming query handle (already started).
+    Read JSONL files from the Volume and write to a bronze Delta table.
     """
-    source_path = f"{BASE_PATH}/{event_type}"
-    checkpoint_path = f"{CHECKPOINT_BASE}/{event_type}"
-
-    reader = (
-        spark.readStream
-        .format("cloudFiles")
-        .option("cloudFiles.format", "json")
-        .option("cloudFiles.schemaLocation", f"{checkpoint_path}/_schema")
-        .option("cloudFiles.inferColumnTypes", "true")
-        .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
-        # Directory listing mode — works with R2 (no S3 event notifications needed)
-        .option("cloudFiles.useNotifications", "false")
-        # Only pick up .jsonl files (ignore _state/ and other metadata)
-        .option("pathGlobFilter", "*.jsonl")
-    )
-
-    # Schema hints help Auto Loader assign correct types on first inference
-    if schema_hints:
-        reader = reader.option("cloudFiles.schemaHints", schema_hints)
+    source_path = f"{VOLUME_PATH}/{event_type}"
+    full_table = f"{CATALOG}.{SCHEMA}.{target_table}"
 
     df = (
-        reader
-        .load(source_path)
-        # Add ingestion metadata — same pattern as the batch bronze notebook
+        spark.read
+        .option("multiline", "false")
+        .option("recursiveFileLookup", "true")
+        .json(source_path)
         .withColumn("_ingested_at", current_timestamp())
         .withColumn("_source_file", input_file_name())
         .withColumn("_event_type", lit(event_type))
     )
 
-    full_table = f"{CATALOG}.{SCHEMA}.{target_table}"
+    row_count = df.count()
+    if row_count == 0:
+        print(f"  {target_table:35s} — no data found")
+        return 0
 
-    query = (
-        df.writeStream
+    (
+        df.write
         .format("delta")
-        .outputMode("append")
-        .option("checkpointLocation", checkpoint_path)
+        .mode("overwrite")
         .option("mergeSchema", "true")
-        # availableNow: process all new files then stop (good for scheduled jobs).
-        # Switch to processingTime for continuous near-real-time ingestion:
-        #   .trigger(processingTime="30 seconds")
-        .trigger(availableNow=True)
-        .toTable(full_table)
+        .saveAsTable(full_table)
     )
 
-    return query
+    print(f"  {target_table:35s} → {row_count:>8,} rows")
+    return row_count
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Trigger Modes
-# MAGIC
-# MAGIC | Mode | Code | Use Case |
-# MAGIC |------|------|----------|
-# MAGIC | **Batch (used here)** | `.trigger(availableNow=True)` | Scheduled job — process all pending files, then stop. Cluster can shut down between runs. |
-# MAGIC | **Continuous** | `.trigger(processingTime="30 seconds")` | Always-on — poll for new files every 30 seconds. Sub-minute latency. |
-# MAGIC | **Once (legacy)** | `.trigger(once=True)` | Older API — same as `availableNow` but less efficient. Prefer `availableNow`. |
-# MAGIC
-# MAGIC We use `availableNow=True` below so the notebook can run as a scheduled job.
-# MAGIC The checkpoint ensures each file is processed exactly once across runs.
+# MAGIC ## Ingest All Event Types
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Ingest: Customers
+TABLE_MAP = {
+    "customers": "raw_customers_stream",
+    "transactions": "raw_transactions_stream",
+    "refunds": "raw_refunds_stream",
+    "activity": "raw_activity_stream",
+}
 
-# COMMAND ----------
+print("Loading Volume → Bronze Delta tables...")
+print()
 
-print("🔄 Streaming customers from R2...")
-q_customers = stream_from_r2(
-    event_type="customers",
-    target_table="raw_customers_stream",
-    schema_hints="id STRING, email STRING, created LONG",
-)
-q_customers.awaitTermination()
+total_rows = 0
+for event_type, table_name in TABLE_MAP.items():
+    rows = ingest_to_bronze(event_type, table_name)
+    total_rows += rows
 
-count = spark.table(f"{CATALOG}.{SCHEMA}.raw_customers_stream").count()
-print(f"✅ raw_customers_stream: {count:,} rows")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Ingest: Transactions (Stripe PaymentIntents)
-
-# COMMAND ----------
-
-print("🔄 Streaming transactions from R2...")
-q_transactions = stream_from_r2(
-    event_type="transactions",
-    target_table="raw_transactions_stream",
-    schema_hints="id STRING, amount LONG, currency STRING, status STRING, created LONG",
-)
-q_transactions.awaitTermination()
-
-count = spark.table(f"{CATALOG}.{SCHEMA}.raw_transactions_stream").count()
-print(f"✅ raw_transactions_stream: {count:,} rows")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Ingest: Refunds
-
-# COMMAND ----------
-
-print("🔄 Streaming refunds from R2...")
-q_refunds = stream_from_r2(
-    event_type="refunds",
-    target_table="raw_refunds_stream",
-    schema_hints="id STRING, amount LONG, currency STRING, status STRING, created LONG",
-)
-q_refunds.awaitTermination()
-
-count = spark.table(f"{CATALOG}.{SCHEMA}.raw_refunds_stream").count()
-print(f"✅ raw_refunds_stream: {count:,} rows")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Ingest: User Activity Events
-
-# COMMAND ----------
-
-print("🔄 Streaming activity events from R2...")
-q_activity = stream_from_r2(
-    event_type="activity",
-    target_table="raw_activity_stream",
-    schema_hints="event_id STRING, event_type STRING, customer_id STRING, timestamp STRING",
-)
-q_activity.awaitTermination()
-
-count = spark.table(f"{CATALOG}.{SCHEMA}.raw_activity_stream").count()
-print(f"✅ raw_activity_stream: {count:,} rows")
+print(f"\n✅ Bronze ingestion complete: {total_rows:,} total rows")
 
 # COMMAND ----------
 
@@ -261,25 +257,18 @@ print(f"✅ raw_activity_stream: {count:,} rows")
 
 # COMMAND ----------
 
-STREAM_TABLES = [
-    "raw_customers_stream",
-    "raw_transactions_stream",
-    "raw_refunds_stream",
-    "raw_activity_stream",
-]
-
 print("=" * 60)
 print("STREAMING INGESTION SUMMARY")
 print("=" * 60)
 total = 0
-for t in STREAM_TABLES:
-    fqn = f"{CATALOG}.{SCHEMA}.{t}"
+for table_name in TABLE_MAP.values():
+    fqn = f"{CATALOG}.{SCHEMA}.{table_name}"
     try:
         n = spark.table(fqn).count()
     except Exception:
         n = 0
     total += n
-    print(f"  {t:35s} {n:>10,}")
+    print(f"  {table_name:35s} {n:>10,}")
 print("-" * 60)
 print(f"  {'TOTAL':35s} {total:>10,}")
 
@@ -287,8 +276,8 @@ if total == 0:
     print()
     print("⚠️  No data ingested. Possible causes:")
     print("   1. The Cloudflare Worker hasn't run yet (no files in R2)")
-    print("   2. R2 connection not configured (run 01a first)")
-    print("   3. Bucket name mismatch (check R2_BUCKET variable)")
+    print("   2. R2 credentials not set (run 01a first)")
+    print("   3. Bucket name mismatch (check r2_bucket widget)")
 
 # COMMAND ----------
 
@@ -297,13 +286,13 @@ if total == 0:
 
 # COMMAND ----------
 
-for t in STREAM_TABLES:
-    fqn = f"{CATALOG}.{SCHEMA}.{t}"
+for table_name in TABLE_MAP.values():
+    fqn = f"{CATALOG}.{SCHEMA}.{table_name}"
     try:
         count = spark.table(fqn).count()
         if count > 0:
             print(f"\n{'─' * 60}")
-            print(f"  {t} — {count:,} rows (showing first 5)")
+            print(f"  {table_name} — {count:,} rows (showing first 5)")
             print(f"{'─' * 60}")
             display(spark.table(fqn).limit(5))  # noqa: F405
     except Exception:
@@ -312,50 +301,25 @@ for t in STREAM_TABLES:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Switching to Continuous Mode
+# MAGIC ## Scheduling
 # MAGIC
-# MAGIC To run Auto Loader as a **continuously streaming** pipeline (sub-minute latency):
+# MAGIC This notebook is designed for **scheduled execution**:
 # MAGIC
-# MAGIC 1. Change the trigger in `stream_from_r2`:
-# MAGIC    ```python
-# MAGIC    .trigger(processingTime="30 seconds")  # Poll every 30 seconds
-# MAGIC    ```
+# MAGIC 1. Each run syncs only **new** files from R2 (checkpoint-tracked)
+# MAGIC 2. Bronze tables are rebuilt from all synced files in the Volume
+# MAGIC 3. Schedule every 15–30 minutes to keep bronze fresh
 # MAGIC
-# MAGIC 2. Start all 4 streams without awaiting each one:
-# MAGIC    ```python
-# MAGIC    q1 = stream_from_r2("customers", "raw_customers_stream")
-# MAGIC    q2 = stream_from_r2("transactions", "raw_transactions_stream")
-# MAGIC    q3 = stream_from_r2("refunds", "raw_refunds_stream")
-# MAGIC    q4 = stream_from_r2("activity", "raw_activity_stream")
-# MAGIC
-# MAGIC    # Monitor active streams
-# MAGIC    for s in spark.streams.active:
-# MAGIC        print(f"  {s.name}: {s.status}")
-# MAGIC    ```
-# MAGIC
-# MAGIC 3. Set the downstream DLT pipeline to **Continuous** mode (instead of Triggered)
-# MAGIC    so silver/gold tables update as new bronze data arrives.
-# MAGIC
-# MAGIC 4. To stop all streams:
-# MAGIC    ```python
-# MAGIC    for s in spark.streams.active:
-# MAGIC        s.stop()
-# MAGIC    ```
+# MAGIC **Setup:** Workflows → Create Job → Add this notebook → Schedule `*/15 * * * *`
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Next Steps
 # MAGIC
-# MAGIC - The **original notebooks 01 + 02** (local data gen + batch ingestion) are still
-# MAGIC   available as a fallback if you want to work without the R2 connection.
-# MAGIC - The **DLT pipeline** (notebooks 03 + 04) works with either ingestion path.
-# MAGIC   To use the streaming tables, update the source table names in notebook 03:
+# MAGIC - The **DLT pipeline** (notebooks 03 + 04) works with these streaming tables.
+# MAGIC   Update source table names in notebook 03:
 # MAGIC   ```python
-# MAGIC   # Change from:
-# MAGIC   spark.read.table("fintech_lab.bronze.raw_customers")
-# MAGIC   # To:
 # MAGIC   spark.read.table("fintech_lab.bronze.raw_customers_stream")
 # MAGIC   ```
-# MAGIC - Run `05_fraud_detection` and `06_analytics_queries` against the gold layer as before.
-# MAGIC - Use `07_workflow_orchestration` to schedule this notebook on a recurring basis.
+# MAGIC - Run `05_fraud_detection` and `06_analytics_queries` against the gold layer.
+# MAGIC - The **original notebooks 01 + 02** remain as an offline fallback.

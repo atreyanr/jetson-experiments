@@ -5,11 +5,14 @@
 # MAGIC # Configure Cloudflare R2 Connection
 # MAGIC
 # MAGIC This notebook establishes a connection between Databricks and a **Cloudflare R2** bucket
-# MAGIC that serves as the landing zone for our fintech event data. R2 is S3-compatible, so we
-# MAGIC use Spark's S3A filesystem connector with R2's endpoint URL.
+# MAGIC that serves as the landing zone for our fintech event data.
 # MAGIC
-# MAGIC **Run this notebook once** per cluster session before using `01b_streaming_ingestion`.
-# MAGIC The configuration persists for the lifetime of the cluster.
+# MAGIC **Databricks Free Edition uses serverless compute (Spark Connect)**, which does not
+# MAGIC support Hadoop filesystem configs (`fs.s3a.*`). Instead, we use **`boto3`** (the standard
+# MAGIC Python S3 client) to pull data from R2 into a Unity Catalog Volume, then Spark reads
+# MAGIC from the Volume natively.
+# MAGIC
+# MAGIC **Run this notebook once** per session before using `01b_streaming_ingestion`.
 
 # COMMAND ----------
 
@@ -18,15 +21,17 @@
 # MAGIC
 # MAGIC Before running this notebook, ensure you have:
 # MAGIC
-# MAGIC 1. ✅ A **Cloudflare R2 bucket** named `fintech-events` (or your chosen name)
-# MAGIC 2. ✅ An **R2 API token** with Object Read & Write permissions
-# MAGIC 3. ✅ Your **R2 Access Key ID** and **Secret Access Key**
+# MAGIC 1. ✅ A **Cloudflare R2 bucket** named `fintech-events`
+# MAGIC 2. ✅ An **R2 API token** with Object Read permission
 # MAGIC    - Found in: Cloudflare Dashboard → R2 → Manage R2 API Tokens
+# MAGIC 3. ✅ Your **R2 Access Key ID** and **Secret Access Key** (from the API token)
 # MAGIC 4. ✅ Your **R2 S3-compatible endpoint URL**
 # MAGIC    - Format: `https://<account_id>.r2.cloudflarestorage.com`
-# MAGIC    - Found in: Cloudflare Dashboard → R2 → your bucket → Settings → S3 API
-# MAGIC
-# MAGIC > **Tip:** The account ID is the hex string in your Cloudflare dashboard URL.
+# MAGIC 5. ✅ Notebook `00_setup_catalog` has been run (Unity Catalog + Volume exist)
+
+# COMMAND ----------
+
+# MAGIC %pip install boto3 -q
 
 # COMMAND ----------
 
@@ -52,28 +57,19 @@ print("⬆️  Fill in the widget values at the top of this notebook, then run t
 # MAGIC
 # MAGIC ### Option A — Databricks Secrets (recommended for production)
 # MAGIC
-# MAGIC Store credentials in a Databricks secret scope so they are encrypted at rest
-# MAGIC and never visible in notebook output:
-# MAGIC
 # MAGIC ```bash
-# MAGIC # Run these via the Databricks CLI (one-time setup):
 # MAGIC databricks secrets create-scope fintech-r2
 # MAGIC databricks secrets put-secret fintech-r2 access-key --string-value "<your-access-key>"
 # MAGIC databricks secrets put-secret fintech-r2 secret-key --string-value "<your-secret-key>"
 # MAGIC databricks secrets put-secret fintech-r2 endpoint   --string-value "https://<account_id>.r2.cloudflarestorage.com"
 # MAGIC ```
 # MAGIC
-# MAGIC Then replace the widget reads below with:
+# MAGIC Then replace widget reads with:
 # MAGIC ```python
 # MAGIC r2_access_key = dbutils.secrets.get("fintech-r2", "access-key")
-# MAGIC r2_secret_key = dbutils.secrets.get("fintech-r2", "secret-key")
-# MAGIC r2_endpoint   = dbutils.secrets.get("fintech-r2", "endpoint")
 # MAGIC ```
 # MAGIC
-# MAGIC ### Option B — Widgets (used here for learning / quick setup)
-# MAGIC
-# MAGIC The widgets above are fine for experimentation. The values are session-scoped
-# MAGIC and not persisted to the notebook source.
+# MAGIC ### Option B — Widgets (used here for quick setup)
 
 # COMMAND ----------
 
@@ -83,7 +79,6 @@ r2_secret_key = dbutils.widgets.get("r2_secret_key")  # noqa: F405
 r2_endpoint = dbutils.widgets.get("r2_endpoint")  # noqa: F405
 r2_bucket = dbutils.widgets.get("r2_bucket")  # noqa: F405
 
-# Validate that all fields are filled
 missing = []
 if not r2_access_key:
     missing.append("R2 Access Key ID")
@@ -104,99 +99,84 @@ print(f"   Endpoint: {r2_endpoint}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 3: Configure Spark S3A Connector for R2
+# MAGIC ## Step 3: Connect to R2 via boto3
 # MAGIC
-# MAGIC Cloudflare R2 is S3-compatible but requires **path-style access** (not virtual-hosted).
-# MAGIC We configure Spark's `S3AFileSystem` to point at the R2 endpoint.
+# MAGIC Databricks Free Edition (serverless / Spark Connect) blocks Hadoop `fs.s3a.*` configs.
+# MAGIC We use `boto3` instead — the standard Python S3 client that works with any
+# MAGIC S3-compatible storage including Cloudflare R2.
 
 # COMMAND ----------
 
-# R2 is S3-compatible — configure the S3A filesystem connector
-spark.conf.set("fs.s3a.endpoint", r2_endpoint)
-spark.conf.set("fs.s3a.access.key", r2_access_key)
-spark.conf.set("fs.s3a.secret.key", r2_secret_key)
+import boto3
 
-# R2 requires path-style access (not virtual-hosted-style)
-spark.conf.set("fs.s3a.path.style.access", "true")
+s3 = boto3.client(
+    "s3",
+    endpoint_url=r2_endpoint,
+    aws_access_key_id=r2_access_key,
+    aws_secret_access_key=r2_secret_key,
+    region_name="auto",
+)
 
-# Use the S3A filesystem implementation
-spark.conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-
-# Enable SSL for secure transport
-spark.conf.set("fs.s3a.connection.ssl.enabled", "true")
-
-# Disable S3 bucket existence checks (R2 doesn't support GetBucketLocation)
-spark.conf.set("fs.s3a.bucket.probe", "0")
-
-print("✅ Spark S3A connector configured for Cloudflare R2")
+print("✅ boto3 S3 client configured for Cloudflare R2")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Step 4: Test the Connection
-# MAGIC
-# MAGIC Verify we can reach the R2 bucket and list its contents.
 
 # COMMAND ----------
 
-base_path = f"s3a://{r2_bucket}"
-
 try:
-    files = dbutils.fs.ls(base_path)  # noqa: F405
+    response = s3.list_objects_v2(Bucket=r2_bucket, MaxKeys=20)
+    objects = response.get("Contents", [])
     print(f"✅ Connected to R2 bucket: {r2_bucket}")
     print(f"   Endpoint: {r2_endpoint}")
-    print(f"   Found {len(files)} top-level paths:")
-    for f in files[:20]:  # Show first 20 to avoid flooding output
-        size_str = f"{f.size:,} bytes" if f.size > 0 else "directory"
-        print(f"   📁 {f.name:40s} {size_str}")
-    if len(files) > 20:
-        print(f"   ... and {len(files) - 20} more")
+    print(f"   Found {len(objects)} objects (showing up to 20):")
+    for obj in objects:
+        size_str = f"{obj['Size']:,} bytes"
+        print(f"   📄 {obj['Key']:55s} {size_str}")
+    if response.get("IsTruncated"):
+        print("   ... (more objects exist)")
 except Exception as e:
     error_msg = str(e)
     print(f"❌ Connection failed: {error_msg[:200]}")
     print()
-    print("Troubleshooting:")
     if "403" in error_msg or "Forbidden" in error_msg:
-        print("  → Access denied. Check that your R2 API token has Object Read permission.")
+        print("  → Check R2 API token has Object Read permission.")
     elif "404" in error_msg or "NoSuchBucket" in error_msg:
-        print(f"  → Bucket '{r2_bucket}' not found. Verify the bucket name in Cloudflare R2.")
-    elif "UnknownHost" in error_msg or "resolve" in error_msg.lower():
-        print(f"  → Cannot resolve endpoint. Verify: {r2_endpoint}")
-        print("    Expected format: https://<account_id>.r2.cloudflarestorage.com")
+        print(f"  → Bucket '{r2_bucket}' not found.")
+    elif "resolve" in error_msg.lower():
+        print(f"  → Cannot resolve endpoint: {r2_endpoint}")
+        print("    Expected: https://<account_id>.r2.cloudflarestorage.com")
     else:
-        print("  → Check your R2 Access Key, Secret Key, and endpoint URL.")
-        print("  → Ensure the R2 API token has not expired.")
+        print("  → Check Access Key, Secret Key, and endpoint URL.")
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC -- (Optional) Unity Catalog External Location
-# MAGIC --
-# MAGIC -- For full governance over external data, register the R2 bucket as an
-# MAGIC -- external location. This requires a storage credential and admin privileges.
-# MAGIC --
-# MAGIC -- Step 1: Create a storage credential (admin only):
-# MAGIC -- CREATE STORAGE CREDENTIAL IF NOT EXISTS fintech_r2_cred
-# MAGIC -- WITH (AWS_KEY_ID = '<r2_access_key>', AWS_SECRET_KEY = '<r2_secret_key>');
-# MAGIC --
-# MAGIC -- Step 2: Create the external location:
-# MAGIC -- CREATE EXTERNAL LOCATION IF NOT EXISTS fintech_r2
-# MAGIC -- URL 's3a://fintech-events'
-# MAGIC -- WITH (STORAGE CREDENTIAL fintech_r2_cred);
-# MAGIC --
-# MAGIC -- Note: External locations with custom S3 endpoints may have limited support
-# MAGIC -- in Databricks Free Edition. The direct S3A configuration above works universally.
+# MAGIC %md
+# MAGIC ## Step 5: Verify Volume Exists
+
+# COMMAND ----------
+
+VOLUME_PATH = "/Volumes/fintech_lab/bronze/landing_zone"
+
+try:
+    files = dbutils.fs.ls(VOLUME_PATH)  # noqa: F405
+    print(f"✅ Volume exists: {VOLUME_PATH}")
+    print(f"   Contains {len(files)} items")
+except Exception:
+    print(f"⚠️  Volume not found at {VOLUME_PATH}")
+    print("   Run notebook 00_setup_catalog first to create it.")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## ✅ Configuration Complete
 # MAGIC
-# MAGIC The Spark session is now configured to read from Cloudflare R2. This configuration
-# MAGIC persists for the lifetime of the current cluster.
+# MAGIC The boto3 S3 client can reach Cloudflare R2. The ingestion flow:
 # MAGIC
-# MAGIC **Next steps:**
-# MAGIC 1. Run `01b_streaming_ingestion` to start streaming data from R2 into bronze Delta tables
-# MAGIC 2. Or run `02_bronze_ingestion` if you prefer the batch approach with locally generated data
+# MAGIC 1. `boto3` downloads JSONL files from R2 → Unity Catalog Volume
+# MAGIC 2. Spark reads from the Volume natively (no S3A config needed)
+# MAGIC 3. Works on **all Databricks compute types** including serverless
 # MAGIC
-# MAGIC **To re-run later:** If the cluster restarts, run this notebook again to restore the R2 connection.
+# MAGIC **Next:** Run `01b_streaming_ingestion` to sync R2 data into bronze Delta tables.
