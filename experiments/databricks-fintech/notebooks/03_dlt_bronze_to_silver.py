@@ -78,7 +78,7 @@ from pyspark.sql.types import DecimalType, DateType, BooleanType
 @dlt.expect("has_last_name", "last_name IS NOT NULL")
 def customers():
     """Bronze customers → silver: dedup, parse dates, standardize text."""
-    raw = spark.read.table("fintech_lab.bronze.raw_customers")
+    raw = spark.read.table("fintech_lab.bronze.raw_customers_stream")
 
     # Deduplicate: keep the most recently ingested record per customer_id
     dedup_window = Window.partitionBy("customer_id").orderBy(col("_ingested_at").desc())
@@ -294,7 +294,7 @@ def exchange_rates():
 @dlt.expect("valid_status", "status IN ('completed', 'pending', 'failed', 'reversed')")
 def transactions():
     """Bronze transactions → silver: dedup, fix amounts, filter future dates."""
-    raw = spark.read.table("fintech_lab.bronze.raw_transactions")
+    raw = spark.read.table("fintech_lab.bronze.raw_transactions_stream")
 
     # Deduplicate on transaction_id
     dedup_window = Window.partitionBy("transaction_id").orderBy(col("_ingested_at").desc())
@@ -352,7 +352,7 @@ def transactions():
 )
 def transactions_quarantine():
     """Capture future-dated and otherwise invalid transactions for review."""
-    raw = spark.read.table("fintech_lab.bronze.raw_transactions")
+    raw = spark.read.table("fintech_lab.bronze.raw_transactions_stream")
 
     dedup_window = Window.partitionBy("transaction_id").orderBy(col("_ingested_at").desc())
     deduped = (
