@@ -15,7 +15,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -61,7 +61,7 @@ jobs:
     if: needs.detect-changes.outputs.python == 'true' || needs.detect-changes.outputs.ci == 'true'
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run environment smoke test
         run: python3 scripts/smoke_test.py
@@ -71,7 +71,7 @@ jobs:
     if: needs.detect-changes.outputs.python == 'true'
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install ruff
         run: pip install --quiet ruff
